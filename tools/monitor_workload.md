@@ -20,13 +20,13 @@ This script display the used/deployed resources of a Kubernetes cluster.
 ```
 monitor_workload.sh -n
 ```
-![pods display](img/monitor-workload-nodes.png)
+![Nodes display](img/monitor-workload-nodes.png)
 
 * At Pod level : Pods list by namespace highlighting status
 ```
 monitor_workload.sh -p
 ```
-![pods display](img/monitor-workload-pods.png)
+![Pods display](img/monitor-workload-pods.png)
 
 # Requirements
 

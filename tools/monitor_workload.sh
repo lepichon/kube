@@ -5,7 +5,7 @@
 tabs -18
 
 declare -a MONITORED_NS
-MONITORED_NS=(kube-system es-cluster infra mongo monitoring rabbitmq zipkin daas infra paas rds default)
+MONITORED_NS=(kube-system default)
 
 # Refresh time after informations are collected
 REFRESH_TIME=4
