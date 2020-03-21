@@ -27,6 +27,15 @@ cleanup() {
     exit
 }
 
+sizehumanToBytes() {
+    sizestr=$1
+    echo ${sizestr} | numfmt --round=up   --to=iec --from=iec-i --to=none
+}
+
+sizeBytesToHuman() {
+    echo $1 | numfmt  --round=up --from=none --to=iec-i
+}
+
 get_services() {
     svc=$1
     ${KUBECTL} get services -n $svc 2>/dev/null \
@@ -63,6 +72,60 @@ parse_item_val() {
 clear_screen() {
     printf '\033[2J'
 }
+
+compute_cluster_resources() {
+    declare -A nodes_flavors
+    total_size_pvc=0
+    total_nodes_mem=0
+    total_nodes_cpu=0
+    total_nodes_cnt=0
+    
+    # pvc
+    while read s; do 
+        if [ -n "$s" ]; then
+                     # add i at end of unit if mising
+                     [[ $s =~ .*i$ ]] || s=$s"i"
+            bytesize=$(sizehumanToBytes "$s")
+        	test -z "$bytesize" && bytesize=0
+        else
+            bytesize=0
+        fi
+        total_size_pvc=$((( ${total_size_pvc} + ${bytesize} )))
+    done < <(kubectl get pvc --all-namespaces \
+               -o jsonpath='{.items[?(@.kind=="PersistentVolumeClaim")].status.capacity.storage}' \
+               | tr ' ' '\n' && echo)
+                            
+    # nodes RAM
+    while read s; do
+        bytesize=$(sizehumanToBytes "$s")
+        total_nodes_mem=$((( ${total_nodes_mem} + ${bytesize} )))
+        (( total_nodes_cnt++ ))
+    done < <(kubectl get nodes \
+                     -o jsonpath='{.items[?(@.kind=="Node")].status.capacity.memory}' \
+                     | tr ' ' '\n' && echo)
+    
+    # nodes vCPU
+    total_nodes_cpu=$(kubectl get nodes \
+                        -o jsonpath='{.items[?(@.kind=="Node")].status.capacity.cpu}' \
+                        | tr ' ' '\n' \
+                        | awk '{sum+=$1} END { print sum}')
+    
+    # nodes flavor
+    while read flavor; do
+        nodes_flavors[$flavor]=$((( nodes_flavors[$flavor]+1 )))
+    done < <(kubectl get nodes -o=yaml| grep beta.kubernetes.io/instance-type: | awk '{print $2}')
+    
+    # Display results
+    echo "Nodes count : ${total_nodes_cnt}" >> ${TEMP_LOG_FILE}
+    echo "Total Nodes Memory : $(sizeBytesToHuman ${total_nodes_mem}) (${total_nodes_mem} bytes)" >> ${TEMP_LOG_FILE}
+    echo "Total Nodes vCPUs : ${total_nodes_cpu}" >> ${TEMP_LOG_FILE}
+    echo "Total PVC : $(sizeBytesToHuman ${total_size_pvc}) (${total_size_pvc} bytes)" >> ${TEMP_LOG_FILE}
+    echo "Nodes flavors:" >> ${TEMP_LOG_FILE}
+    for i in ${!nodes_flavors[@]}; do
+        echo -e "\t- ${nodes_flavors[$i]}: $i" >> ${TEMP_LOG_FILE}
+    done
+}
+
 # Define global var NODES_ITEMS_LIST (strings \n delimited)
 # NODES_ITEMS_LIST=  $node  $cpu_req  $cpu_lim \t $mem_req  $mem_lim
 #
@@ -284,6 +347,7 @@ Usage: $(basename $0) [options...]
 No option will whatch for nodes and pod resources on all available namespaces
 
   -w    Filter Pods from configurated namespaces only
+  -c    Display Clusters deployed resources and exit
   -n    Display Nodes used resources informations and exit
   -p    Watch only Pods deployed resources informations
   -h    Display this help
@@ -305,6 +369,7 @@ trap cleanup INT TERM
 while (( "$#" )); do
    case $1 in
       -w) CONF_NS="true" ;;
+      -c) CLUSTER_ONLY="true" ;;
       -n) NODES_ONLY="true" ;;
       -p) PODS_ONLY="true" ;;
       -h) print_help ;;
@@ -326,7 +391,7 @@ while :; do
   IFS=${IFS_DEFAULT}
 
   # collect nodes infos
-  if [ -z "${PODS_ONLY}" ]; then
+  if [[ -z "${PODS_ONLY}" && -z "${CLUSTER_ONLY}" ]]; then
     get_nodes_infos;
   fi
 
@@ -340,9 +405,19 @@ while :; do
       IFS=$'\n'
 
       # ---------------------------
+      # Compute/Write Cluster informations
+      #
+      if [ -n "${CLUSTER_ONLY}" ]; then
+        compute_cluster_resources;
+        clear_screen
+        cat ${TEMP_LOG_FILE}
+        exit
+      fi        
+
+      # ---------------------------
       # Compute/Write Nodes informations
       #
-      if [ -z "${PODS_ONLY}" ]; then
+      if [[ -z "${PODS_ONLY}" && -z "${CLUSTER_ONLY}" ]]; then
         compute_nodes_infos;
       fi
 
