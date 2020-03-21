@@ -5,7 +5,7 @@
 tabs -18
 
 declare -a MONITORED_NS
-MONITORED_NS=(kube-system default)
+MONITORED_NS=(kube-system es-cluster infra mongo monitoring rabbitmq zipkin daas infra paas rds default)
 
 # Refresh time after informations are collected
 REFRESH_TIME=4
@@ -39,6 +39,30 @@ get_pods() {
         | awk 'NR>1 {printf "%-50s %-4s %-10s %-10s %s\n", $1, $2, $3, $4,$5}'
 }
 
+check_k8s_connexion() {
+    echo "Test cluster active connexion..."
+    ${KUBECTL} get namespaces >/dev/null 2>&1
+    if [ $? != 0 ]; then
+        echo "!! You're not connected to k8s cluster !!"
+        echo "!! Please login to the cluster and retry"
+        exit 1
+    fi
+}
+
+parse_item_pct() {
+    val=$1
+    echo "$val" | sed 's/.*(\([0-9]\+\)\%).*/\1/'
+}
+
+parse_item_val() {
+    val=$1
+    echo "$val" | perl -npe 's/([0-9]+)([gmki]{1,2})\s.*/$1 $2/i'
+}
+
+
+clear_screen() {
+    printf '\033[2J'
+}
 # Define global var NODES_ITEMS_LIST (strings \n delimited)
 # NODES_ITEMS_LIST=  $node  $cpu_req  $cpu_lim \t $mem_req  $mem_lim
 #
@@ -61,8 +85,10 @@ compute_nodes_infos() {
     # Display Nodes informations
     #
     # Nodes columns format
-    NODE_FMT="%-55s%-15s%-15s%-25s%-25s\n"
+    NODE_FMT="%-55s%-15s%-15s%-15s%-25s%-25s%-25s\n"
     printf "${NODE_FMT}" "=============================================" \
+                         "==========" \
+                         "==========" \
                          "==========" \
                          "==========" \
                          "==========" \
@@ -70,15 +96,19 @@ compute_nodes_infos() {
     printf "${bold}${NODE_FMT}${end}" "NODES Hostname" \
                                       "CPU Req" \
                                       "CPU Lim" \
+                                      "CPU Lim Left" \
                                       "Memory Req" \
-                                      "Memory Lim" >> ${TEMP_LOG_FILE}
+                                      "Memory Lim" \
+                                      "Memory Lim Left" >> ${TEMP_LOG_FILE}
     printf "${NODE_FMT}" "---------------------------------------------" \
+                         "----------" \
+                         "----------" \
                          "----------" \
                          "----------" \
                          "----------" \
                          "----------" >> ${TEMP_LOG_FILE}
     
-    let TOTAL_NODES=TOTAL_REQ_CPU=TOTAL_LIM_CPU=TOTAL_REQ_MEM=TOTAL_LIM_MEM=0
+    let TOTAL_NODES=TOTAL_REQ_CPU_PCT=TOTAL_LIM_CPU_PCT=TOTAL_LIM_CPU_LEFT_PCT=TOTAL_REQ_MEM_PCT=TOTAL_LIM_MEM_PCT=TOTAL_LIM_MEM_LEFT_PCT=0
 
     for line in ${NODES_ITEMS_LIST}; do
         # split node line items columns
@@ -86,37 +116,87 @@ compute_nodes_infos() {
 
         # make columns as array
         declare -a node_array_items=()
+        declare -a node_all_items=()
         for node_item in ${node_line_items}; do
             node_array_items+=("${node_item}")
         done
         # calcul total resources usage percentage (excluding master)
         if ! [[ "${node_array_items[0]}" =~ master ]]; then
           TOTAL_NODES=$(expr ${TOTAL_NODES} + 1)
-          TOTAL_REQ_CPU=$(expr ${TOTAL_REQ_CPU} + $(parse_percentage "${node_array_items[1]}"))
-          TOTAL_LIM_CPU=$(expr ${TOTAL_LIM_CPU} + $(parse_percentage "${node_array_items[2]}"))
-          TOTAL_REQ_MEM=$(expr ${TOTAL_REQ_MEM} + $(parse_percentage "${node_array_items[3]}"))
-          TOTAL_LIM_MEM=$(expr ${TOTAL_REQ_MEM} + $(parse_percentage "${node_array_items[4]}"))
+          
+          node=${node_array_items[0]}
+
+          # Used resources values
+          cpu_req_val=$(parse_item_val "${node_array_items[1]}"  | cut -d' ' -f1)
+          cpu_req_unit=$(parse_item_val "${node_array_items[1]}" | cut -d' ' -f2)
+          cpu_lim_val=$(parse_item_val "${node_array_items[2]}"  | cut -d' ' -f1)
+          cpu_lim_unit=$(parse_item_val "${node_array_items[2]}" | cut -d' ' -f2)
+          mem_req_val=$(parse_item_val "${node_array_items[3]}"  | cut -d' ' -f1)
+          mem_req_unit=$(parse_item_val "${node_array_items[3]}" | cut -d' ' -f2)
+          mem_lim_val=$(parse_item_val "${node_array_items[4]}"  | cut -d' ' -f1)
+          mem_lim_unit=$(parse_item_val "${node_array_items[4]}" | cut -d' ' -f2)
+
+          # Used resources %
+          cpu_req_pct=$(parse_item_pct "${node_array_items[1]}")
+          cpu_lim_pct=$(parse_item_pct "${node_array_items[2]}")
+          mem_req_pct=$(parse_item_pct "${node_array_items[3]}")
+          mem_lim_pct=$(parse_item_pct "${node_array_items[4]}")
+
+          # Left resources %
+          cpu_req_left_pct=$(echo "100 - ${cpu_req_pct}" | bc)
+          cpu_lim_left_pct=$(echo "100 - ${cpu_lim_pct}" | bc)
+          mem_req_left_pct=$(echo "100 - ${mem_req_pct}" | bc)
+          mem_lim_left_pct=$(echo "100 - ${mem_lim_pct}" | bc)
+
+          # Left resources values
+          cpu_req_left_val=$(echo "(${cpu_req_left_pct} * ${cpu_req_val}) / ${cpu_req_pct}" | bc)
+          cpu_lim_left_val=$(echo "(${cpu_lim_left_pct} * ${cpu_lim_val}) / ${cpu_lim_pct}" | bc)
+          mem_req_left_val=$(echo "(${mem_req_left_pct} * ${mem_req_val}) / ${mem_req_pct}" | bc)
+          mem_lim_left_val=$(echo "(${mem_lim_left_pct} * ${mem_lim_val}) / ${mem_lim_pct}" | bc)
+
+          # node, cpu_req_val, cpu_req_pct, cpu_lim_val, cpu_lim_pct, cpu_lim_left_val, cpu_lim_left_pct, 
+          #       mem_req_val, mem_req_pct, mem_lim_val, mem_lim_pct, mem_lim_left_val, mem_lim_left_pct
+          node_all_items=(${node} "${cpu_req_val}${cpu_req_unit} (${cpu_req_pct}%)" 
+                                  "${cpu_lim_val}${cpu_lim_unit} (${cpu_lim_pct}%)" 
+                                  "${cpu_lim_left_val}${cpu_lim_unit} (${cpu_lim_left_pct}%)"
+                                  "${mem_req_val}${mem_req_unit} (${mem_req_pct}%)" 
+                                  "${mem_lim_val}${mem_lim_unit} (${mem_lim_pct}%)" 
+                                  "${mem_lim_left_val}${mem_lim_unit} (${mem_lim_left_pct}%)"
+                         )   
+          # Total avg calcul
+          TOTAL_REQ_CPU_PCT=$(echo "${TOTAL_REQ_CPU_PCT} + ${cpu_req_pct}" | bc)
+          TOTAL_LIM_CPU_PCT=$(echo "${TOTAL_LIM_CPU_PCT} + ${cpu_lim_pct}" | bc)
+          TOTAL_LIM_CPU_LEFT_PCT=$(echo "${TOTAL_LIM_CPU_LEFT_PCT} + ${cpu_lim_left_pct}" | bc)
+          TOTAL_REQ_MEM_PCT=$(echo "${TOTAL_REQ_MEM_PCT} + ${mem_req_pct}" | bc)
+          TOTAL_LIM_MEM_PCT=$(echo "${TOTAL_LIM_MEM_PCT} + ${mem_lim_pct}" | bc)
+          TOTAL_LIM_MEM_LEFT_PCT=$(echo "${TOTAL_LIM_MEM_LEFT_PCT} + ${mem_lim_left_pct}" | bc)
         fi
-        printf "${NODE_FMT}" ${node_array_items[@]} >> ${TEMP_LOG_FILE}
+        printf "${NODE_FMT}" ${node_all_items[@]} >> ${TEMP_LOG_FILE}
     done
 
     # ---------------------------
     # Display total resource usage 
     #
-    TOTAL_REQ_CPU=$(expr ${TOTAL_REQ_CPU} / ${TOTAL_NODES})
-    TOTAL_LIM_CPU=$(expr ${TOTAL_LIM_CPU} / ${TOTAL_NODES})
-    TOTAL_REQ_MEM=$(expr ${TOTAL_REQ_MEM} / ${TOTAL_NODES})
-    TOTAL_LIM_MEM=$(expr ${TOTAL_LIM_MEM} / ${TOTAL_NODES})
+    TOTAL_REQ_CPU_PCT=$(expr ${TOTAL_REQ_CPU_PCT} / ${TOTAL_NODES})
+    TOTAL_LIM_CPU_PCT=$(expr ${TOTAL_LIM_CPU_PCT} / ${TOTAL_NODES})
+    TOTAL_LIM_CPU_LEFT_PCT=$(expr ${TOTAL_LIM_CPU_LEFT_PCT} / ${TOTAL_NODES})
+    TOTAL_REQ_MEM_PCT=$(expr ${TOTAL_REQ_MEM_PCT} / ${TOTAL_NODES})
+    TOTAL_LIM_MEM_PCT=$(expr ${TOTAL_LIM_MEM_PCT} / ${TOTAL_NODES})
+    TOTAL_LIM_MEM_LEFT_PCT=$(expr ${TOTAL_LIM_MEM_LEFT_PCT} / ${TOTAL_NODES})
     printf "${NODE_FMT}" "---------------------------------------------" \
+                         "----------" \
+                         "----------" \
                          "----------" \
                          "----------" \
                          "----------" \
                          "----------" >> ${TEMP_LOG_FILE}
     printf "${NODE_FMT}" "Total ${TOTAL_NODES} nodes resources usage :"  \
-                         "AVG: ${TOTAL_REQ_CPU}%" \
-                         "AVG: ${TOTAL_LIM_CPU}%" \
-                         "AVG: ${TOTAL_REQ_MEM}%" \
-                         "AVG: ${TOTAL_LIM_MEM}%" >> ${TEMP_LOG_FILE}
+                         "AVG: ${TOTAL_REQ_CPU_PCT}%" \
+                         "AVG: ${TOTAL_LIM_CPU_PCT}%" \
+                         "AVG: ${TOTAL_LIM_CPU_LEFT_PCT}%" \
+                         "AVG: ${TOTAL_REQ_MEM_PCT}%" \
+                         "AVG: ${TOTAL_LIM_MEM_PCT}%" \
+                         "AVG: ${TOTAL_LIM_MEM_LEFT_PCT}%" >> ${TEMP_LOG_FILE}
     echo >> ${TEMP_LOG_FILE}
 }
 
@@ -195,24 +275,7 @@ compute_pods_infos(){
     done
 }
 
-check_k8s_connexion() {
-    echo "Test cluster active connexion..."
-    ${KUBECTL} get namespaces >/dev/null 2>&1
-    if [ $? != 0 ]; then
-        echo "!! You're not connected to k8s cluster !!"
-        echo "!! Please login to the cluster and retry"
-        exit 1
-    fi
-}
 
-parse_percentage() {
-    val=$1
-    echo "$val" | sed 's/.*(\([0-9]\+\)\%).*/\1/'
-}
-
-clear_screen() {
-    printf '\033[2J'
-}
 
 print_help() {
     cat <<EOTXT
