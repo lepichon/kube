@@ -119,8 +119,8 @@ compute_cluster_resources() {
           bytesize=0
       fi
       total_size_pvc=$((( ${total_size_pvc} + ${bytesize} )))
-    done < <(${KUBECTL} get pvc --all-namespaces \
-               -o jsonpath='{.items[?(@.kind=="PersistentVolumeClaim")].status.capacity.storage}' \
+    done < <(${KUBECTL} get pv \
+               -o jsonpath='{.items[?(@.kind=="PersistentVolume")].spec.capacity.storage}' \
                | tr ' ' '\n' && echo)
                             
     # nodes RAM
@@ -225,8 +225,9 @@ compute_nodes_top_infos() {
                         "----------" "----------" "----------" >> ${TEMP_LOG_FILE}
    
    for node_line in $(${KUBECTL} top nodes --no-headers 2>/dev/null); do
-       nodes_line_items=($(echo "$node_line" | perl -npe 's/\s+$//' | perl -npe 's/(\s{1,}|\t)/\n/g'))
-       NODES_CONSUMPTION["${nodes_line_items[0]}"]="${nodes_line_items[@]:1}"
+       node="$(echo $node_line | awk '{print $1}')"
+       nodes_line_str="$(echo $node_line | perl -npe 's/^[^\s]+\s+//' | perl -npe 's/(\s{1,})/\t/g')"
+       NODES_CONSUMPTION["${node}"]="$nodes_line_str"
    done
 
    # verify consumption data on existing nodes
